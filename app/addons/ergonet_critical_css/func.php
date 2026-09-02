@@ -91,6 +91,65 @@ function fn_ergonet_critical_css_get(): string
 }
 
 /**
+ * Χτίζει τα <link rel="preload"> για τις γραμματοσειρές κειμένου του πάνω μέρους.
+ *
+ * ΤΟ ΠΡΟΒΛΗΜΑ: με το critical CSS στη θέση του, η μόνη μετατόπιση που έμενε ήταν η
+ * εναλλαγή γραμματοσειράς — μετρημένο 02/09/2026, CLS 0,132 με γραμματοσειρές και
+ * **0,001 χωρίς αυτές**. Το ελληνικό Open Sans Condensed είναι μόλις 7,8 KB και
+ * έφτανε στα 1.713 ms, γιατί ο browser το ανακαλύπτει μόνο αφού αναλύσει το CSS και
+ * βρει ποιο κείμενο το χρειάζεται. Μέχρι τότε έχει ήδη ζωγραφίσει με την εφεδρική.
+ *
+ * ΤΟ URL ΠΡΕΠΕΙ ΝΑ ΕΙΝΑΙ ΑΚΡΙΒΕΣ. Ένα preload που διαφέρει έστω στο `?timestamp`
+ * κατεβάζει το αρχείο ΔΕΥΤΕΡΗ φορά αντί να προλάβει την πρώτη. Γι' αυτό το URL δεν
+ * κατασκευάζεται εδώ — εξάγεται από το ίδιο το critical CSS, που είναι η ίδια πηγή
+ * από την οποία θα το ζητήσει ο browser.
+ *
+ * Η λίστα είναι αρχείο και όχι ρύθμιση επίτηδες: οι ρυθμίσεις addon του CS-Cart
+ * σβήνονται ολόκληρες από fn_update_addon_settings(), και ένα κενό preload_fonts
+ * θα ήταν αόρατη παλινδρόμηση απόδοσης.
+ *
+ * @param string $css Το critical CSS όπως θα ενσωματωθεί
+ * @return string HTML με τα link tags, ή κενό
+ */
+function fn_ergonet_critical_css_preload_links(string $css): string
+{
+    $list = Registry::get('config.dir.addons') . 'ergonet_critical_css/assets/preload-fonts.txt';
+    if (!is_readable($list)) {
+        return '';
+    }
+    $out = '';
+    $seen = [];
+    foreach (preg_split('~\R~', (string) file_get_contents($list)) ?: [] as $line) {
+        $name = trim($line);
+        if ($name === '' || $name[0] === '#') {
+            continue;
+        }
+        // Το basename αρκεί ως κλειδί· η διαδρομή έρχεται από το CSS, όχι από τη λίστα.
+        // Τα εισαγωγικά είναι προαιρετικά στο url() και ο combiner τα βάζει —
+        // χωρίς αυτά στο μοτίβο, το preload βγαίνει σιωπηλά κενό.
+        $re = '~url\(\s*["\']?([^)"\'\s]*' . preg_quote($name, '~') . '[^)"\'\s]*)["\']?\s*\)~i';
+        if (!preg_match($re, $css, $m)) {
+            continue;
+        }
+        $url = trim($m[1], "'\" \t");
+        // Οι διαδρομές στο bundle είναι σχετικές με πολλά ../· inline στο HTML
+        // αναλύονται ως προς το URL της σελίδας και το ../ σταματά στη ρίζα. Τα
+        // κανονικοποιούμε ρητά ώστε το preload και το CSS να ζητούν την ΙΔΙΑ συμβολοσειρά.
+        $url = '/' . ltrim(preg_replace('~^(\.\./)+~', '', $url), '/');
+        if (isset($seen[$url])) {
+            continue;
+        }
+        $seen[$url] = true;
+        // crossorigin είναι ΥΠΟΧΡΕΩΤΙΚΟ στα fonts ακόμη και same-origin: χωρίς αυτό
+        // το preload μπαίνει σε άλλο cache bucket από την αίτηση της CSS και το
+        // αρχείο κατεβαίνει δύο φορές.
+        $out .= '<link rel="preload" as="font" type="font/woff2" href="'
+             . htmlspecialchars($url, ENT_QUOTES, 'UTF-8') . '" crossorigin>';
+    }
+    return $out;
+}
+
+/**
  * Smarty output filter: ενθέτει το critical CSS και ξεμπλοκάρει το bundle.
  *
  * @param string $html Το πλήρες HTML της σελίδας
@@ -130,7 +189,10 @@ function fn_ergonet_critical_css_rewrite(string $html): string
 
     // ΧΩΡΙΣ ΑΥΤΟ Η ΣΕΛΙΔΑ ΜΕΝΕΙ ΑΣΤΥΛΙΣΤΗ ΜΕ JS ΚΛΕΙΣΤΗ: το onload δεν τρέχει ποτέ,
     // άρα το media μένει "print" για πάντα. Το <noscript> δίνει το κανονικό link.
-    $replacement = '<style id="erg-critical">' . $css . '</style>'
+    // Τα preload μπαίνουν ΠΡΙΝ το inline CSS: ο browser τα βλέπει νωρίτερα στο
+    // parsing και ξεκινά τη λήψη ενώ ακόμη διαβάζει τους κανόνες.
+    $replacement = fn_ergonet_critical_css_preload_links($css)
+        . '<style id="erg-critical">' . $css . '</style>'
         . $nonblocking
         . '<noscript>' . $original . '</noscript>';
 

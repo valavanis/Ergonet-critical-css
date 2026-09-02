@@ -39,6 +39,29 @@ const EXTRACT = (vh) => {
         const r = el.getBoundingClientRect();
         return r.bottom >= 0 && r.top <= vh * 1.25 && r.width > 0 && r.height > 0;
     };
+    /* ΤΟ ΚΕΝΟ ΠΟΥ ΕΣΤΕΙΛΕ ΤΟ CLS ΣΤΟ 0,88 (μετρήθηκε 02/09/2026).
+       Το inView απαιτεί width>0 και height>0 — δηλαδή ένα κρυμμένο στοιχείο δεν
+       «φαίνεται» ΠΟΤΕ, άρα ο κανόνας που το κρύβει δεν έμπαινε ποτέ στο critical.
+       Αποτέλεσμα: τα 136 `ty-menu__submenu` του bundle έλειπαν, τα υπομενού
+       αποδίδονταν ξεδιπλωμένα, και όταν έφτανε το πλήρες stylesheet η κεφαλίδα
+       κατέρρεε 1.055 → 285px παρασύροντας ΟΛΗ τη σελίδα.
+
+       Ο κανόνας που αφαιρεί κάτι από τη ροή είναι κρίσιμος ΑΚΡΙΒΩΣ επειδή το
+       στοιχείο δεν φαίνεται. Κρατιέται με κριτήριο την ΥΠΑΡΞΗ στο DOM, όχι την
+       ορατότητα. Στενό σύνολο τιμών: μόνο όσες αλλάζουν τη ροή. Το visibility και
+       το opacity δεν μπαίνουν — δεσμεύουν χώρο, άρα δεν μετατοπίζουν τίποτα. */
+    const collapses = (st) => {
+        if (!st) { return false; }
+        const d = st.getPropertyValue('display').trim();
+        if (d === 'none') { return true; }
+        const p = st.getPropertyValue('position').trim();
+        if (p === 'absolute' || p === 'fixed') { return true; }
+        for (const prop of ['height', 'max-height']) {
+            const v = st.getPropertyValue(prop).trim();
+            if (v === '0' || v === '0px' || v === '0%') { return true; }
+        }
+        return false;
+    };
     const clean = (sel) => sel.split(',').map((s) => s
         .replace(/::?(before|after|placeholder|selection|backdrop|-[\w-]+)/g, '')
         .replace(/:(hover|focus|focus-within|active|visited|checked|disabled|not\([^)]*\))/g, '').trim())
@@ -52,7 +75,7 @@ const EXTRACT = (vh) => {
                     let els = [];
                     try { els = [...document.querySelectorAll(probe)]; }
                     catch (e) { keep.push(rule.cssText); continue; }
-                    if (els.some(inView)) { keep.push(rule.cssText); }
+                    if (els.some(inView) || (els.length && collapses(rule.style))) { keep.push(rule.cssText); }
                 } else if (rule.type === CSSRule.MEDIA_RULE) {
                     if (!window.matchMedia(rule.conditionText).matches) { continue; }
                     const inner = [];
@@ -62,7 +85,7 @@ const EXTRACT = (vh) => {
                         let els = [];
                         try { els = probe ? [...document.querySelectorAll(probe)] : []; }
                         catch (e) { inner.push(r2.cssText); continue; }
-                        if (!probe || els.some(inView)) { inner.push(r2.cssText); }
+                        if (!probe || els.some(inView) || (els.length && collapses(r2.style))) { inner.push(r2.cssText); }
                     }
                     if (inner.length) { keep.push('@media ' + rule.conditionText + '{' + inner.join('') + '}'); }
                 } else if (rule.type === CSSRule.FONT_FACE_RULE || rule.type === CSSRule.KEYFRAMES_RULE
@@ -74,6 +97,13 @@ const EXTRACT = (vh) => {
     };
     for (const sh of document.styleSheets) {
         try {
+            /* ΣΥΣΣΩΡΕΥΣΗ: το inline <style id="erg-critical"> ΔΕΝ έχει href, οπότε
+               περνούσε τον έλεγχο παρακάτω και η γεννήτρια κατάπινε το προϊόν του
+               προηγούμενου τρεξίματος. Κάθε γύρος πρόσθετε ένα ακόμη αντίγραφο των
+               @font-face με το τότε ?timestamp — μετρήθηκαν 3 γενιές μαζί. Το
+               critical μεγάλωνε μονότονα και ο browser έβλεπε το ίδιο αρχείο
+               γραμματοσειράς κάτω από τρία URL. Πηγή είναι ΜΟΝΟ το bundle. */
+            if (sh.ownerNode && sh.ownerNode.id === 'erg-critical') { continue; }
             if (sh.href && !sh.href.includes('standalone')) { continue; }
             walk(sh.cssRules);
         } catch (e) { /* cross-origin */ }
