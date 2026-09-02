@@ -18,4 +18,9 @@
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-25 * * * * root /usr/bin/flock -n /tmp/qt-critical-css.lock /usr/local/sbin/qt-critical-css >/dev/null 2>&1
+# ΧΩΡΙΣ flock ΕΔΩ. Το ίδιο το script κλειδώνει το ΙΔΙΟ αρχείο εσωτερικά
+# (exec 9>"$LOCK"; flock -n 9). Wrapper flock στο ίδιο path σημαίνει ότι ο
+# γονέας κρατά ήδη το lock, το παιδί αποτυγχάνει ΠΑΝΤΑ, γράφει «τρέχει ήδη»
+# και βγαίνει με 0. Μετρημένο 02/09/2026: και οι τρεις φύλακες ήταν μόνιμα
+# no-op από την πρώτη στιγμή — πράσινοι μόνο στις χειροκίνητες δοκιμές.
+25 * * * * root /usr/local/sbin/qt-critical-css >/dev/null 2>&1
