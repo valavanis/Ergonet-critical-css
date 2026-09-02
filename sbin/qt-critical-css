@@ -1,0 +1,108 @@
+#!/bin/bash
+# Κρατά το critical CSS συγχρονισμένο με το θέμα.
+#
+# ΓΙΑΤΙ ΥΠΑΡΧΕΙ: το critical CSS είναι στιγμιότυπο. Κάθε αλλαγή στο θέμα το κάνει
+# λάθος, και η βλάβη είναι ΑΟΡΑΤΗ σε κάθε άλλο έλεγχο — το πλήρες stylesheet
+# φορτώνει κανονικά, ο qt-css-guard δείχνει πράσινο, και το μόνο σύμπτωμα είναι μια
+# σύντομη αναπήδηση στην πρώτη απόδοση που κανείς αυτόματος έλεγχος δεν βλέπει.
+#
+# Η ΣΚΑΝΔΑΛΗ ΕΙΝΑΙ ΤΟ ΠΕΡΙΕΧΟΜΕΝΟ, ΟΧΙ ΤΟ ΡΟΛΟΪ. Το bundle λέγεται
+# standalone.<md5 περιεχομένου><timestamp>.css. Το timestamp αλλάζει σε ΚΑΘΕ
+# καθάρισμα cache — αν σκανδάλιζε αυτό, θα ξαναχτίζαμε τζάμπα δεκάδες φορές τη
+# μέρα. Τα πρώτα 32 hex είναι το md5 του περιεχομένου: αλλάζει μόνο όταν αλλάξει
+# όντως το CSS. Ο έλεγχος κοστίζει ΕΝΑ αίτημα, οπότε τρέχει ωριαία και το παράθυρο
+# παλαίωσης είναι το πολύ μία ώρα.
+#
+# Χρήση:
+#   qt-critical-css              έλεγχος, και ξαναχτίσιμο αν χρειάζεται
+#   qt-critical-css --force      ξαναχτίσιμο ό,τι κι αν λέει το hash
+#   qt-critical-css --check      μόνο αναφορά, καμία εγγραφή
+set -uo pipefail
+
+SITE="${QT_CRIT_SITE:-https://qualitytoners.gr}"
+DOCROOT=/var/www/qualitytoners.gr/public
+ADDON="$DOCROOT/app/addons/ergonet_critical_css"
+CSS="$ADDON/assets/critical.css"
+HASHFILE="$ADDON/assets/critical.hash"
+GEN="$(dirname "$0")/generate_critical.js"
+NOTIFY="${QT_CRIT_NOTIFY:-$DOCROOT/var/qt-notify.php}"
+LOG="${QT_CRIT_LOG:-/var/log/qt-critical-css.log}"
+LOCK=/tmp/qt-critical-css.lock
+GUARD=/usr/local/sbin/qt-css-guard
+
+ts() { date '+%Y-%m-%d %H:%M:%S'; }
+log() { echo "$(ts)  $*" >> "$LOG"; }
+
+exec 9>"$LOCK"
+flock -n 9 || { log "παραλείφθηκε: τρέχει ήδη"; exit 0; }
+
+# ── Ποιο bundle σερβίρεται τώρα ───────────────────────────────────────────────
+# Πραγματικός UA: το Cloudflare ενθέτει διαφορετικά ανά UA, και θέλουμε ό,τι
+# βλέπει ο επισκέπτης.
+HTML=$(curl -s --max-time 60 "$SITE/" \
+    -H 'User-Agent: Mozilla/5.0 (Linux; Android 12; Pixel 5) AppleWebKit/537.36 Chrome/141 Mobile Safari/537.36')
+BUNDLE=$(printf '%s' "$HTML" | grep -oP 'standalone\.\K[0-9a-f]{32}' | head -1)
+
+if [ -z "$BUNDLE" ]; then
+    log "ΔΕΝ βρέθηκε bundle στο HTML — δεν αγγίζω τίποτα"
+    exit 2
+fi
+
+OLD=$(cat "$HASHFILE" 2>/dev/null || echo '')
+FORCE=0; [ "${1:-}" = "--force" ] && FORCE=1
+
+if [ "${1:-}" = "--check" ]; then
+    echo "  τρέχον hash θέματος: $BUNDLE"
+    echo "  hash του critical:   ${OLD:-（κανένα）}"
+    [ "$BUNDLE" = "$OLD" ] && echo "  ΣΥΓΧΡΟΝΙΣΜΕΝΟ" || echo "  ΠΑΛΙΩΜΕΝΟ — χρειάζεται ξαναχτίσιμο"
+    exit 0
+fi
+
+if [ "$BUNDLE" = "$OLD" ] && [ "$FORCE" -eq 0 ]; then
+    exit 0                                  # σιωπηλά: τρέχει ωριαία
+fi
+
+log "το θέμα άλλαξε: ${OLD:-κανένα} → $BUNDLE · ξαναχτίζω"
+
+# ── Χτίσιμο σε προσωρινό, ΠΟΤΕ απευθείας πάνω από το ζωντανό ──────────────────
+TMP=$(mktemp /tmp/critical.XXXXXX.css)
+if ! node "$GEN" "$TMP" "$SITE" >>"$LOG" 2>&1; then
+    log "ΑΠΕΤΥΧΕ το χτίσιμο — το ζωντανό critical.css ΔΕΝ πειράχτηκε"
+    rm -f "$TMP"
+    printf 'Το critical CSS χρειάζεται ξαναχτίσιμο (το θέμα άλλαξε) αλλά η γεννήτρια απέτυχε.\nΤο παλιό critical.css παραμένει ενεργό — η σελίδα δουλεύει, αλλά η πρώτη απόδοση\nμπορεί να δείχνει σύντομη αναπήδηση μέχρι να διορθωθεί.\n\nΈλεγχος: qt-critical-css --check\nΧειροκίνητα: qt-critical-css --force\n' \
+        | sudo -u cscart-qt /usr/bin/php8.2 "$NOTIFY" "⚠ qualitytoners: το critical CSS δεν ξαναχτίστηκε" >/dev/null 2>&1
+    exit 2
+fi
+
+# ── Εγκατάσταση με εφεδρικό ───────────────────────────────────────────────────
+BAK="$CSS.$(date -u +%Y%m%dT%H%M%SZ).bak"
+[ -f "$CSS" ] && cp -p "$CSS" "$BAK"
+install -o cscart-qt -g cscart-qt -m 0644 "$TMP" "$CSS"
+printf '%s' "$BUNDLE" > "$HASHFILE"
+chown cscart-qt:cscart-qt "$HASHFILE"
+rm -f "$TMP"
+log "εγκαταστάθηκε: $(stat -c%s "$CSS") bytes (εφεδρικό: $(basename "$BAK"))"
+
+# ── Οι σελίδες κουβαλούν το ΠΑΛΙΟ inline CSS μέχρι να ξαναχτιστούν ────────────
+find "$DOCROOT/var/ergonet_rocket_cache" -maxdepth 1 \( -name '*.html' -o -name '*.html.gz' \) -delete 2>/dev/null
+rm -rf "$DOCROOT/var/ergonet_rocket_cache/direct"/* 2>/dev/null
+# Το Cloudflare μέσω της ουράς του rocket cache — τα διαπιστευτήρια είναι εκτός
+# open_basedir, οπότε το γράψιμο στην ουρά είναι ο μόνος δρόμος από PHP.
+cd "$DOCROOT" && sudo -u cscart-qt /usr/bin/php8.2 -r '
+define("AREA","A"); define("ACCOUNT_TYPE","admin"); require "init.php";
+if (function_exists("fn_ergonet_rocket_cache_cf_collect")) {
+    fn_ergonet_rocket_cache_cf_collect(ERGONET_RC_CF_PURGE_ALL);
+    fn_ergonet_rocket_cache_cf_flush();
+}' >/dev/null 2>&1 && log "CF purge στην ουρά"
+
+# ── Επαλήθευση ΑΠΟΔΟΣΗΣ, όχι πρόθεσης ────────────────────────────────────────
+sleep 5
+if [ -x "$GUARD" ] && ! "$GUARD" --json >/dev/null 2>&1; then
+    log "ΠΡΟΣΟΧΗ: ο φύλακας CSS πέφτει μετά το ξαναχτίσιμο"
+    printf 'Το critical CSS ξαναχτίστηκε αλλά ο φύλακας CSS αναφέρει πρόβλημα.\nΕπαναφορά: cp %s %s\n' "$BAK" "$CSS" \
+        | sudo -u cscart-qt /usr/bin/php8.2 "$NOTIFY" "⚠ qualitytoners: ο φύλακας CSS πέφτει μετά το ξαναχτίσιμο" >/dev/null 2>&1
+    exit 1
+fi
+
+log "ΟΚ — critical συγχρονισμένο με $BUNDLE"
+exit 0
