@@ -41,7 +41,31 @@ flock -n 9 || { log "παραλείφθηκε: τρέχει ήδη"; exit 0; }
 # βλέπει ο επισκέπτης.
 HTML=$(curl -s --max-time 60 "$SITE/" \
     -H 'User-Agent: Mozilla/5.0 (Linux; Android 12; Pixel 5) AppleWebKit/537.36 Chrome/141 Mobile Safari/537.36')
-BUNDLE=$(printf '%s' "$HTML" | grep -oP 'standalone\.\K[0-9a-f]{32}' | head -1)
+# ΠΡΟΣΟΧΗ ΣΤΟ ΤΙ ΣΥΓΚΡΙΝΕΤΑΙ. Το όνομα είναι
+#   standalone.<32 hex ταυτότητας θέματος><10ψήφιο timestamp>.css
+# και η προηγούμενη εκδοχή έπαιρνε ΜΟΝΟ τα 32 hex. Εκείνα ΔΕΝ αλλάζουν όταν
+# αλλάζει το ΠΕΡΙΕΧΟΜΕΝΟ του CSS — μόνο όταν αλλάζει το σύνολο των αρχείων.
+#
+# ΤΙ ΚΟΣΤΙΣΕ, μετρημένο 02/09/2026: δύο αλλαγές στυλ την ίδια μέρα (χρώματα
+# μάρκας, font-display) πέρασαν και οι δύο απαρατήρητες. Το critical.css έμεινε
+# παγωμένο στις 13:25 δηλώνοντας ακόμα `font-display: block` για τις FontAwesome
+# ενώ το bundle είχε swap — δηλαδή η διόρθωση ήταν ζωντανή στο bundle και
+# ΑΝΕΝΕΡΓΗ εκεί που μετράει, αφού το inline critical CSS κυβερνά την πρώτη
+# απόδοση. Φάνηκε μόνο επειδή ο ιδιοκτήτης έστειλε χειρότερο FCP.
+#
+# Συγκρίνεται τώρα το ΠΕΡΙΕΧΟΜΕΝΟ. Κοστίζει ένα κατέβασμα ~80 KB την ώρα και
+# απαντά στην πραγματική ερώτηση: «άλλαξε το CSS;» — όχι «άλλαξε το όνομα;».
+BUNDLE_URL=$(printf '%s' "$HTML" | grep -oP 'href="\K[^"]*standalone\.[^"]*\.css[^"]*' | head -1)
+BUNDLE=''
+if [ -n "$BUNDLE_URL" ]; then
+    BUNDLE=$(curl -s --max-time 60 "$BUNDLE_URL" | md5sum | cut -d' ' -f1)
+fi
+# Εφεδρεία: αν το κατέβασμα αποτύχει, γυρνάμε στο όνομα. Χειρότερος έλεγχος,
+# αλλά ΠΟΤΕ σιωπηλή απώλεια του φύλακα.
+if [ -z "$BUNDLE" ]; then
+    BUNDLE=$(printf '%s' "$HTML" | grep -oP 'standalone\.\K[0-9a-f]+' | head -1)
+    log "ΠΡΟΣΟΧΗ: το bundle δεν κατέβηκε — σύγκριση με το όνομα αντί για το περιεχόμενο"
+fi
 
 if [ -z "$BUNDLE" ]; then
     log "ΔΕΝ βρέθηκε bundle στο HTML — δεν αγγίζω τίποτα"
@@ -84,8 +108,28 @@ rm -f "$TMP"
 log "εγκαταστάθηκε: $(stat -c%s "$CSS") bytes (εφεδρικό: $(basename "$BAK"))"
 
 # ── Οι σελίδες κουβαλούν το ΠΑΛΙΟ inline CSS μέχρι να ξαναχτιστούν ────────────
-find "$DOCROOT/var/ergonet_rocket_cache" -maxdepth 1 \( -name '*.html' -o -name '*.html.gz' \) -delete 2>/dev/null
-rm -rf "$DOCROOT/var/ergonet_rocket_cache/direct"/* 2>/dev/null
+FPC_DIR="$DOCROOT/var/ergonet_rocket_cache"
+# Μετράμε ΠΡΙΝ σβήσουμε: ο έλεγχος πρέπει να λέει πόσο κόστισε το ξαναχτίσιμο,
+# αλλιώς είναι απλώς μια χρονοσφραγίδα.
+PURGED=$(find "$FPC_DIR" -maxdepth 1 \( -name '*.html' -o -name '*.html.gz' \) 2>/dev/null | wc -l)
+find "$FPC_DIR" -maxdepth 1 \( -name '*.html' -o -name '*.html.gz' \) -delete 2>/dev/null
+rm -rf "$FPC_DIR/direct"/* 2>/dev/null
+
+# Το σβήσιμο γίνεται από το filesystem ως root, εκτός PHP, οπότε ΔΕΝ περνά από
+# την fn_ergonet_rocket_cache_audit_purge() ούτε γράφει τη σημαία. Χωρίς τις
+# επόμενες γραμμές αυτή η διαδρομή είναι εντελώς αόρατη — 02/09/2026 έσβησε
+# 1.658 σελίδες, ο έλεγχος δεν είχε καμία εγγραφή, και ο αυτόματος warmer δεν
+# ενεργοποιήθηκε ποτέ. Ώρα Αθήνας, για να είναι μία σειρά με τις PHP εγγραφές.
+NOW=$(TZ=Europe/Athens date --iso-8601=seconds)
+printf '%s mode=all deleted=%s sapi=cli origin=cron | /usr/local/sbin/qt-critical-css (ανακατασκευή critical CSS: %s -> %s)\n' \
+    "$NOW" "$PURGED" "${OLD:-κανένα}" "$BUNDLE" >> "$DOCROOT/var/ergonet_rocket_cache_purge_audit.log"
+
+# Η σημαία που διαβάζει ο qt-fpc-warm-after-deploy κάθε λεπτό. Ίδια διαδρομή με
+# την fn_ergonet_rocket_cache_audit_purge() — αν αλλάξει εκεί, αλλάζει κι εδώ.
+printf '{"at":"%s","type":"critical_css","extra":"qt-critical-css","deleted":%s}\n' \
+    "$NOW" "$PURGED" > "$FPC_DIR/.needs-warm"
+chown cscart-qt:cscart-qt "$FPC_DIR/.needs-warm"
+log "σβήστηκαν $PURGED σελίδες FPC · σημαία ξαναζεστάματος γράφτηκε"
 # Το Cloudflare μέσω της ουράς του rocket cache — τα διαπιστευτήρια είναι εκτός
 # open_basedir, οπότε το γράψιμο στην ουρά είναι ο μόνος δρόμος από PHP.
 cd "$DOCROOT" && sudo -u cscart-qt /usr/bin/php8.2 -r '
