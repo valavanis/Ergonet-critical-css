@@ -89,10 +89,12 @@ fi
 log "το θέμα άλλαξε: ${OLD:-κανένα} → $BUNDLE · ξαναχτίζω"
 
 # ── Χτίσιμο σε προσωρινό, ΠΟΤΕ απευθείας πάνω από το ζωντανό ──────────────────
-TMP=$(mktemp /tmp/critical.XXXXXX.css)
-if ! node "$GEN" "$TMP" "$SITE" >>"$LOG" 2>&1; then
+# Κατάλογος και όχι αρχείο: από 03/09/2026 η γεννήτρια γράφει την ένωση
+# (critical.css) ΚΑΙ ένα αρχείο ανά τύπο σελίδας (critical.products.css …).
+TMP=$(mktemp -d /tmp/critical.XXXXXX)
+if ! node "$GEN" "$TMP" "$SITE" >>"$LOG" 2>&1 || [ ! -s "$TMP/critical.css" ]; then
     log "ΑΠΕΤΥΧΕ το χτίσιμο — το ζωντανό critical.css ΔΕΝ πειράχτηκε"
-    rm -f "$TMP"
+    rm -rf "$TMP"
     printf 'Το critical CSS χρειάζεται ξαναχτίσιμο (το θέμα άλλαξε) αλλά η γεννήτρια απέτυχε.\nΤο παλιό critical.css παραμένει ενεργό — η σελίδα δουλεύει, αλλά η πρώτη απόδοση\nμπορεί να δείχνει σύντομη αναπήδηση μέχρι να διορθωθεί.\n\nΈλεγχος: qt-critical-css --check\nΧειροκίνητα: qt-critical-css --force\n' \
         | sudo -u cscart-qt /usr/bin/php8.2 "$NOTIFY" "⚠ qualitytoners: το critical CSS δεν ξαναχτίστηκε" >/dev/null 2>&1
     exit 2
@@ -101,11 +103,17 @@ fi
 # ── Εγκατάσταση με εφεδρικό ───────────────────────────────────────────────────
 BAK="$CSS.$(date -u +%Y%m%dT%H%M%SZ).bak"
 [ -f "$CSS" ] && cp -p "$CSS" "$BAK"
-install -o cscart-qt -g cscart-qt -m 0644 "$TMP" "$CSS"
+# Πρώτα σβήνονται τα ΠΑΛΙΑ ανά-τύπο αρχεία: αν ένας τύπος δεν γράφτηκε αυτή τη φορά
+# (η γεννήτρια τον παρέλειψε ως ελλιπή), δεν πρέπει να μείνει το προηγούμενο με
+# ξένο hash — το func.php θα πέσει σωστά στην ένωση.
+rm -f "$(dirname "$CSS")"/critical.*.css
+for f in "$TMP"/critical*.css; do
+    install -o cscart-qt -g cscart-qt -m 0644 "$f" "$(dirname "$CSS")/$(basename "$f")"
+done
 printf '%s' "$BUNDLE" > "$HASHFILE"
 chown cscart-qt:cscart-qt "$HASHFILE"
-rm -f "$TMP"
-log "εγκαταστάθηκε: $(stat -c%s "$CSS") bytes (εφεδρικό: $(basename "$BAK"))"
+rm -rf "$TMP"
+log "εγκαταστάθηκε: ένωση $(stat -c%s "$CSS") bytes · ανά τύπο: $(ls "$(dirname "$CSS")"/critical.*.css 2>/dev/null | xargs -n1 basename 2>/dev/null | tr '\n' ' ')(εφεδρικό: $(basename "$BAK"))"
 
 # ── Οι σελίδες κουβαλούν το ΠΑΛΙΟ inline CSS μέχρι να ξαναχτιστούν ────────────
 FPC_DIR="$DOCROOT/var/ergonet_rocket_cache"

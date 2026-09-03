@@ -81,13 +81,59 @@ function fn_ergonet_critical_css_get(): string
     if ($css !== null) {
         return $css;
     }
-    $path = Registry::get('config.dir.addons') . 'ergonet_critical_css/assets/critical.css';
-    $css = (is_readable($path) ? (string) file_get_contents($path) : '');
-    // Κάτω από 1 KB σημαίνει σχεδόν σίγουρα κατεστραμμένο ή μισογραμμένο αρχείο.
-    if (strlen($css) < 1024) {
-        $css = '';
+    $dir = Registry::get('config.dir.addons') . 'ergonet_critical_css/assets/';
+    // Πρώτα το αρχείο του τύπου σελίδας, μετά η ένωση. Η ένωση υπάρχει ΠΑΝΤΑ και
+    // είναι πλήρης — είναι το ίδιο αρχείο που σερβιριζόταν παντού πριν τις 03/09/2026.
+    $candidates = [];
+    $type = fn_ergonet_critical_css_page_type();
+    if ($type !== '') {
+        $candidates[] = $dir . 'critical.' . $type . '.css';
+    }
+    $candidates[] = $dir . 'critical.css';
+    $css = '';
+    foreach ($candidates as $path) {
+        $c = (is_readable($path) ? (string) file_get_contents($path) : '');
+        // Κάτω από 1 KB σημαίνει σχεδόν σίγουρα κατεστραμμένο ή μισογραμμένο αρχείο.
+        if (strlen($c) >= 1024) {
+            $css = $c;
+            break;
+        }
     }
     return $css;
+}
+
+/**
+ * Ο τύπος σελίδας για την επιλογή critical CSS.
+ *
+ * ΓΙΑΤΙ ΑΝΑ ΤΥΠΟ: η ένωση όλων των τύπων ήταν 110 KB inline σε ΚΑΘΕ σελίδα —
+ * η σελίδα προϊόντος στο κινητό κουβαλούσε 72 κανόνες ταμείου και 22 @keyframes.
+ * Το Lighthouse χρέωνε 2.429 ms CPU στο έγγραφο (μόνο 136 ms ήταν JS).
+ *
+ * Τα κλειδιά ΠΡΕΠΕΙ να ταιριάζουν με όσα γράφει το tools/generate_critical.js.
+ * Ό,τι δεν αντιστοιχίζεται (pages, companies, …) παίρνει κενό → ένωση. Ασφαλές
+ * εξ ορισμού: ο άγνωστος τύπος παίρνει το πλήρες σύνολο, ποτέ ένα ξένο υποσύνολο.
+ *
+ * @return string 'index' | 'categories' | 'products' | 'search' | 'auth' | 'cart' | 'checkout' | ''
+ */
+function fn_ergonet_critical_css_page_type(): string
+{
+    $controller = (string) Registry::get('runtime.controller');
+    $mode       = (string) Registry::get('runtime.mode');
+    switch ($controller) {
+        case 'index':
+            return 'index';
+        case 'categories':
+            return 'categories';
+        case 'products':
+            // Η αναζήτηση έχει άλλη διάταξη (φίλτρα, λίστα) από τη σελίδα προϊόντος.
+            return $mode === 'search' ? 'search' : 'products';
+        case 'auth':
+            return 'auth';
+        case 'checkout':
+            return $mode === 'cart' ? 'cart' : 'checkout';
+        default:
+            return '';
+    }
 }
 
 /**
