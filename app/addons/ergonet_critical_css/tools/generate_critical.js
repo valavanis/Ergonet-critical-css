@@ -62,6 +62,27 @@ const EXTRACT = (vh) => {
         }
         return false;
     };
+    /* ΟΙ ΚΑΝΟΝΕΣ ΠΟΥ ΤΟ JS ΕΞΑΦΑΝΙΖΕΙ ΠΡΙΝ ΠΡΟΛΑΒΟΥΜΕ ΝΑ ΤΟΥΣ ΔΟΥΜΕ
+       (μετρήθηκε 03/09/2026, Moto G4 4x CPU).
+
+       Η γεννήτρια εξάγει μετά το `load` + 1,2 s — δηλαδή ΑΦΟΥ το owl carousel
+       αντικαταστήσει το `ty-scroller__item` με `owl-item`. Το markup που στέλνει
+       ο server όμως έχει `ty-scroller__item`, οπότε ο κανόνας που δίνει πλάτος
+       στο slide δεν έμπαινε ΠΟΤΕ στο critical: τα 5 slides μοιράζονταν το δοχείο
+       των 360px και η εικόνα-ήρωας αποδιδόταν 68x68 αντί 360x360 επί ~3,7 s.
+       Το LCP γραφόταν στα 5,8 s ενώ τα pixels ήταν έτοιμα στα 2,0 s.
+
+       Κανένα ευρετικό πάνω στο DOM δεν τους πιάνει — τη στιγμή της μέτρησης δεν
+       υπάρχουν. Γι' αυτό δηλώνονται ρητά, και τραβιούνται από το ΙΔΙΟ bundle
+       ώστε οι τιμές να μένουν συγχρονισμένες.
+
+       ΠΡΟΣΟΧΗ στο υποσύνολο: πρέπει να μπουν ΚΑΙ οι κανόνες nth-child(n+2) που
+       κρύβουν τα slides 2-5. Μόνο το width:100% θα τα στοίβαζε κάθετα και το owl
+       θα τα μάζευε μετά — θα ανταλλάσσαμε LCP με CLS. Το κοινό `.ty-scroller__item`
+       πιάνει και τα δύο. Ίδια λογική με το collapses() παραπάνω: ο κανόνας είναι
+       κρίσιμος ΑΚΡΙΒΩΣ επειδή δεν φαίνεται στη μέτρηση. */
+    const FORCE = ['.ty-scroller__item'];
+    const forced = (sel) => !!sel && FORCE.some((f) => sel.indexOf(f) !== -1);
     const clean = (sel) => sel.split(',').map((s) => s
         .replace(/::?(before|after|placeholder|selection|backdrop|-[\w-]+)/g, '')
         .replace(/:(hover|focus|focus-within|active|visited|checked|disabled|not\([^)]*\))/g, '').trim())
@@ -70,6 +91,7 @@ const EXTRACT = (vh) => {
         for (const rule of rules) {
             try {
                 if (rule.type === CSSRule.STYLE_RULE) {
+                    if (forced(rule.selectorText)) { keep.push(rule.cssText); continue; }
                     const probe = clean(rule.selectorText);
                     if (!probe) { keep.push(rule.cssText); continue; }
                     let els = [];
@@ -81,6 +103,7 @@ const EXTRACT = (vh) => {
                     const inner = [];
                     for (const r2 of rule.cssRules) {
                         if (r2.type !== CSSRule.STYLE_RULE) { inner.push(r2.cssText); continue; }
+                        if (forced(r2.selectorText)) { inner.push(r2.cssText); continue; }
                         const probe = clean(r2.selectorText);
                         let els = [];
                         try { els = probe ? [...document.querySelectorAll(probe)] : []; }
