@@ -64,7 +64,78 @@ function fn_ergonet_critical_css_dispatch_before_display(): void
     }
     $registered = true;
 
-    $view->registerFilter('output', 'fn_ergonet_critical_css_rewrite');
+    fn_ergonet_critical_css_add_output_filter($view, 'fn_ergonet_critical_css_rewrite');
+}
+
+/**
+ * Καταχωρεί output filter και στη Smarty 4 (CS-Cart 4.18) και στη Smarty 5 (CS-Cart 4.21).
+ *
+ * ΓΙΑΤΙ ΟΧΙ ΣΚΕΤΟ registerFilter(): στην 4.21 το Tygh\SmartyEngine\Core::registerFilter() είναι
+ * ΚΕΝΟ — βγάζει μόνο E_USER_DEPRECATED και επιστρέφει. Κανένα σφάλμα, κανένα αποτέλεσμα:
+ * μετρήθηκε 13/10/2026 στο ergonet.store, το hook έτρεχε, το φίλτρο «καταχωρούνταν» και η
+ * σελίδα έβγαινε ανέγγιχτη. Η Smarty 5 εκτελεί output filters μόνο από extensions
+ * (Smarty::runOutputFilters → getExtensions()), οπότε εκεί προσθέτουμε δικό μας extension.
+ * Το dispatch_before_display τρέχει ΜΕΤΑ το setExtensions() του fn_init_templater, άρα το
+ * addExtension δεν σβήνεται.
+ *
+ * @param object   $view Tygh::$app['view']
+ * @param callable $cb   δέχεται το HTML (η Smarty 5 περνά και το Template ως 2ο όρισμα)
+ */
+function fn_ergonet_critical_css_add_output_filter($view, callable $cb): void
+{
+    if (class_exists('\\Smarty\\Extension\\Base') && class_exists('\\Smarty\\Filter\\FilterPluginWrapper')
+        && method_exists($view, 'addExtension')
+    ) {
+        $view->addExtension(new class ($cb) extends \Smarty\Extension\Base {
+            /** @var callable */
+            private $cb;
+
+            public function __construct(callable $cb)
+            {
+                $this->cb = $cb;
+            }
+
+            /** @return list<\Smarty\Filter\FilterInterface> */
+            public function getOutputFilters(): array
+            {
+                return [new \Smarty\Filter\FilterPluginWrapper($this->cb)];
+            }
+        });
+        return;
+    }
+    $view->registerFilter('output', $cb);
+}
+
+/**
+ * Ο φάκελος από τον οποίο διαβάζεται το critical CSS αυτής της σελίδας.
+ *
+ * ΑΝΑ ΘΕΜΑ (v1.3.0, 13/10/2026): το critical CSS είναι στιγμιότυπο ΕΝΟΣ θέματος. Στο
+ * ergonet.store η ίδια εγκατάσταση σερβίρει δύο βιτρίνες με διαφορετικό θέμα
+ * (ergonet_theme, thi_theme)· ένα κοινό αρχείο θα έδινε στη μία βιτρίνα την πρώτη
+ * απόδοση της άλλης. Γι' αυτό τα παραγόμενα αρχεία ζουν στο
+ * var/ergonet_critical_css/<θέμα>/ — έξω από τον φάκελο του addon, ώστε ένα deploy να
+ * μην τα σβήνει ούτε να τα αντικαθιστά με τα αρχεία άλλου καταστήματος.
+ *
+ * Όταν ο var/ergonet_critical_css/ ΥΠΑΡΧΕΙ, το παλιό assets/ ΔΕΝ διαβάζεται ποτέ: ένα
+ * θέμα χωρίς δικό του φάκελο παίρνει κενό, δηλαδή καμία αλλαγή στη σελίδα. Αλλιώς η
+ * βιτρίνα THI θα έπεφτε στο critical.css του qualitytoners που φέρνει το repo.
+ * Όταν ΔΕΝ υπάρχει (qualitytoners σήμερα), όλα μένουν όπως πριν, στο assets/.
+ *
+ * @return string διαδρομή με τελικό '/', ή κενό αν αυτό το θέμα δεν έχει critical CSS
+ */
+function fn_ergonet_critical_css_dir(): string
+{
+    $base = Registry::get('config.dir.var') . 'ergonet_critical_css/';
+    if (!is_dir($base)) {
+        return Registry::get('config.dir.addons') . 'ergonet_critical_css/assets/';
+    }
+    $theme = (string) Registry::get('runtime.layout.theme_name');
+    // Το όνομα γίνεται κομμάτι διαδρομής· οτιδήποτε έξω από το αλφάβητο των θεμάτων
+    // του CS-Cart απορρίπτεται αντί να «καθαριστεί».
+    if (preg_match('~^[a-z0-9_-]{1,64}$~', $theme) !== 1) {
+        return '';
+    }
+    return $base . $theme . '/';
 }
 
 /**
@@ -81,7 +152,10 @@ function fn_ergonet_critical_css_get(): string
     if ($css !== null) {
         return $css;
     }
-    $dir = Registry::get('config.dir.addons') . 'ergonet_critical_css/assets/';
+    $dir = fn_ergonet_critical_css_dir();
+    if ($dir === '') {
+        return $css = '';
+    }
     // Πρώτα το αρχείο του τύπου σελίδας, μετά η ένωση. Η ένωση υπάρχει ΠΑΝΤΑ και
     // είναι πλήρης — είναι το ίδιο αρχείο που σερβιριζόταν παντού πριν τις 03/09/2026.
     $candidates = [];
@@ -159,8 +233,9 @@ function fn_ergonet_critical_css_page_type(): string
  */
 function fn_ergonet_critical_css_preload_links(string $css): string
 {
-    $list = Registry::get('config.dir.addons') . 'ergonet_critical_css/assets/preload-fonts.txt';
-    if (!is_readable($list)) {
+    $dir = fn_ergonet_critical_css_dir();
+    $list = $dir . 'preload-fonts.txt';
+    if ($dir === '' || !is_readable($list)) {
         return '';
     }
     $out = '';

@@ -54,6 +54,10 @@ const MIN_BYTES = parseInt(process.env.QT_CRIT_MIN_BYTES || '40000', 10);
 const PROD = process.env.QT_CRIT_PRODUCT
     || B + '/analosima-ektypoton/analosima-ektypoton/lexmark-b2236dw-mb2236adw-mb2236adwe-toner-black-ehc-6k-b222x00-lexb222x00-clone/';
 
+/* Η κατηγορία, όπως και το προϊόν, ορίζεται από τον καλούντα όταν το κατάστημα δεν
+   είναι το qualitytoners (το cli/rebuild.php τα παίρνει από τη βάση της βιτρίνας). */
+const CAT = process.env.QT_CRIT_CATEGORY || B + '/analosima-ektypoton/';
+
 /* Κάθε κανόνας ως { m: συνθήκη @media ή '', c: cssText }. Η ένωση και τα ανά-τύπο
    σύνολα δουλεύουν σε επίπεδο ΚΑΝΟΝΑ, όχι μπλοκ @media, αλλιώς η τομή τους δεν
    ορίζεται· στην έξοδο ξαναομαδοποιούνται ανά συνθήκη ώστε τα bytes να μη διπλασιαστούν. */
@@ -74,15 +78,37 @@ const EXTRACT = (vh) => {
        στοιχείο δεν φαίνεται. Κρατιέται με κριτήριο την ΥΠΑΡΞΗ στο DOM, όχι την
        ορατότητα. Στενό σύνολο τιμών: μόνο όσες αλλάζουν τη ροή. Το visibility και
        το opacity δεν μπαίνουν — δεσμεύουν χώρο, άρα δεν μετατοπίζουν τίποτα. */
-    const collapses = (st) => {
+    /* ΤΙΜΕΣ ΜΕΣΩ ΜΕΤΑΒΛΗΤΗΣ (13/10/2026, ergonet.store). Το θέμα κρύβει την κεφαλίδα της
+       σελίδας προϊόντος στο κινητό με `display: var(--ty-products-header-grid-display)` και
+       `:root{--ty-products-header-grid-display:none}`. Το κείμενο του κανόνα λέει «var(…)»,
+       όχι «none», οπότε ο κανόνας έμενε έξω: η κεφαλίδα (142 px) αποδιδόταν ορατή και
+       χανόταν όταν έφτανε το πλήρες stylesheet — CLS 0,004 → 0,168. Όταν η δηλωμένη τιμή
+       περιέχει var(), κρίνει η ΥΠΟΛΟΓΙΣΜΕΝΗ τιμή των στοιχείων που ταιριάζουν. */
+    const collapsingValue = (prop, v) => {
+        if (prop === 'display') { return v === 'none'; }
+        if (prop === 'position') { return v === 'absolute' || v === 'fixed'; }
+        return v === '0' || v === '0px' || v === '0%';
+    };
+    /* ΚΑΝΟΝΕΣ ΠΟΥ ΟΡΙΖΟΥΝ ΜΟΝΟ ΜΕΤΑΒΛΗΤΕΣ (13/10/2026, ergonet.store). Η κολλημένη μπάρα
+       «Προσθήκη στο καλάθι» κρύβεται στο desktop με
+       `@media (min-width:768px){.ty-product-bottom-fixed{--ty-product-bottom-fixed-display:none}}`
+       — καμία δήλωση display, μόνο η μεταβλητή που διαβάζει ο κανόνας `display:var(…)`.
+       Το collapses() δεν είχε τι να κρίνει και η μπάρα αναβόσβηνε στην πρώτη απόδοση.
+       Οι μεταβλητές είναι η «διαμόρφωση» του θέματος: κρατιέται κάθε κανόνας που ορίζει
+       custom properties για στοιχείο που ΥΠΑΡΧΕΙ — λίγα bytes, ποτέ αναπήδηση. */
+    const setsVars = (st) => {
         if (!st) { return false; }
-        const d = st.getPropertyValue('display').trim();
-        if (d === 'none') { return true; }
-        const p = st.getPropertyValue('position').trim();
-        if (p === 'absolute' || p === 'fixed') { return true; }
-        for (const prop of ['height', 'max-height']) {
+        for (let i = 0; i < st.length; i++) { if (st[i].indexOf('--') === 0) { return true; } }
+        return false;
+    };
+    const collapses = (st, els) => {
+        if (!st) { return false; }
+        for (const prop of ['display', 'position', 'height', 'max-height']) {
             const v = st.getPropertyValue(prop).trim();
-            if (v === '0' || v === '0px' || v === '0%') { return true; }
+            if (collapsingValue(prop, v)) { return true; }
+            if (v.indexOf('var(') !== -1 && (els || []).some((el) => collapsingValue(prop, getComputedStyle(el).getPropertyValue(prop).trim()))) {
+                return true;
+            }
         }
         return false;
     };
@@ -116,27 +142,35 @@ const EXTRACT = (vh) => {
        Το (β) είναι το κριτήριο του ανά-τύπο αρχείου. Ό,τι δεν μπορεί να ελεγχθεί
        (άκυρος selector για το querySelectorAll) θεωρείται και κρατούμενο και υπάρχον:
        ένας κανόνας παραπάνω κοστίζει bytes, ένας λιγότερος κοστίζει αναπήδηση. */
-    const styleRule = (rule, m) => {
+    const styleRule = (rule, m, i) => {
         const c = rule.cssText;
-        if (forced(rule.selectorText)) { keep.push({ m, c }); exists.push({ m, c }); return; }
+        if (forced(rule.selectorText)) { keep.push({ m, c, i }); exists.push({ m, c, i }); return; }
         const probe = clean(rule.selectorText);
-        if (!probe) { keep.push({ m, c }); exists.push({ m, c }); return; }
+        if (!probe) { keep.push({ m, c, i }); exists.push({ m, c, i }); return; }
         let els = [];
         try { els = [...document.querySelectorAll(probe)]; }
-        catch (e) { keep.push({ m, c }); exists.push({ m, c }); return; }
-        if (els.length) { exists.push({ m, c }); }
-        if (els.some(inView) || (els.length && collapses(rule.style))) { keep.push({ m, c }); }
+        catch (e) { keep.push({ m, c, i }); exists.push({ m, c, i }); return; }
+        if (els.length) { exists.push({ m, c, i }); }
+        if (els.some(inView) || (els.length && (collapses(rule.style, els) || setsVars(rule.style)))) { keep.push({ m, c, i }); }
     };
+    /* Η ΘΕΣΗ ΣΤΟ BUNDLE (13/10/2026). Η ένωση γεμίζει από 14 σελίδες/αναλύσεις με τη σειρά
+       που ΣΥΝΑΝΤΑ τους κανόνες, όχι με τη σειρά του bundle. Σε ίση ειδικότητα νικά ο
+       τελευταίος, οπότε δύο κανόνες από διαφορετικές σελίδες μπορούσαν να βγουν ανάποδα
+       από το πλήρες stylesheet. Κάθε κανόνας κρατά τον αύξοντα αριθμό του και η έξοδος
+       ταξινομείται με αυτόν. Το bundle είναι το ίδιο σε κάθε σελίδα, άρα ο αριθμός είναι. */
+    let n = 0;
     const walk = (rules) => {
         for (const rule of rules) {
             try {
+                n++;
                 if (rule.type === CSSRule.STYLE_RULE) {
-                    styleRule(rule, '');
+                    styleRule(rule, '', n);
                 } else if (rule.type === CSSRule.MEDIA_RULE) {
                     if (!window.matchMedia(rule.conditionText).matches) { continue; }
                     for (const r2 of rule.cssRules) {
-                        if (r2.type !== CSSRule.STYLE_RULE) { keep.push({ m: rule.conditionText, c: r2.cssText }); exists.push({ m: rule.conditionText, c: r2.cssText }); continue; }
-                        styleRule(r2, rule.conditionText);
+                        n++;
+                        if (r2.type !== CSSRule.STYLE_RULE) { keep.push({ m: rule.conditionText, c: r2.cssText, i: n }); exists.push({ m: rule.conditionText, c: r2.cssText, i: n }); continue; }
+                        styleRule(r2, rule.conditionText, n);
                     }
                 } else if (rule.type === CSSRule.KEYFRAMES_RULE) {
                     /* Χωριστά και με όνομα: ένα @keyframes είναι κρίσιμο ΜΟΝΟ αν κάποιος
@@ -161,6 +195,9 @@ const EXTRACT = (vh) => {
                γραμματοσειράς κάτω από τρία URL. Πηγή είναι ΜΟΝΟ το bundle. */
             if (sh.ownerNode && sh.ownerNode.id === 'erg-critical') { continue; }
             if (sh.href && !sh.href.includes('standalone')) { continue; }
+            // Ο αριθμός μετρά ΜΕΣΑ στο bundle, που είναι ίδιο σε κάθε σελίδα. Τα inline <style>
+            // διαφέρουν ανά σελίδα, οπότε μπαίνουν μετά, για να μη μετατοπίζουν τους αριθμούς.
+            n = sh.href ? 0 : 1e9;
             walk(sh.cssRules);
         } catch (e) { /* cross-origin */ }
     }
@@ -202,7 +239,12 @@ const EXTRACT = (vh) => {
                     await r.fulfill({ response: res, body: html, headers: Object.assign({}, res.headers(), { 'content-length': String(Buffer.byteLength(html)) }) });
                 });
                 await p2.goto(url, { waitUntil: 'load', timeout: 120000 });
-                return (await p2.evaluate(EXTRACT, vp.height)).exists;
+                /* Και τα «κρίσιμα» αυτού του περάσματος, όχι μόνο η ύπαρξη: η ΠΡΩΤΗ απόδοση
+                   γίνεται πριν τρέξει JS, άρα με αυτό εδώ το markup. Μετρημένο 13/10/2026: τα
+                   κουμπιά φωνής/barcode της αναζήτησης έρχονται με `hidden` και τα εμφανίζει
+                   το JS· ο κανόνας `.ee-search-mode[hidden]{display:none}` δεν ταίριαζε στο
+                   μετά-JS DOM, έμενε έξω, και τα εικονίδια φαίνονταν μέχρι το πλήρες CSS. */
+                return await p2.evaluate(EXTRACT, vp.height);
             } finally {
                 await p2.close();
             }
@@ -213,7 +255,11 @@ const EXTRACT = (vh) => {
                 // 1. Ύπαρξη στο server-markup (χωρίς JS). Το `after` (ροή ταμείου) θέλει JS,
                 //    οπότε για εκείνον τον τύπο η pre-JS μέτρηση γίνεται στο τελικό URL μόνο.
                 if (!after) {
-                    (await existsPreJs(url)).forEach((x) => existsBy[type].set(key(x), x));
+                    const pre = await existsPreJs(url);
+                    pre.exists.forEach((x) => existsBy[type].set(key(x), x));
+                    pre.keep.forEach((x) => all.set(key(x), x));
+                    pre.at.forEach((x) => at.add(x));
+                    pre.kf.forEach((k) => kfAll.set(k.name, k.css));
                 }
                 // 2. Κανονική φόρτωση: ορατότητα (ένωση) + ύπαρξη μετά το JS.
                 await page.goto(url, { waitUntil: 'load', timeout: 120000 });
@@ -232,7 +278,7 @@ const EXTRACT = (vh) => {
             }
         };
         await grab('index',      'αρχική',    B + '/');
-        await grab('categories', 'κατηγορία', B + '/analosima-ektypoton/');
+        await grab('categories', 'κατηγορία', CAT);
         await grab('products',   'προϊόν',    PROD);
         await grab('search',     'αναζήτηση', B + '/index.php?dispatch=products.search&q=toner');
         await grab('auth',       'σύνδεση',   B + '/index.php?dispatch=auth.login_form');
@@ -263,7 +309,7 @@ const EXTRACT = (vh) => {
        πρωτοεμφανίστηκαν — η σειρά μετράει στο CSS (ίδια ειδικότητα → νικά ο τελευταίος). */
     const assemble = (rules) => {
         const plain = [], media = new Map();
-        for (const r of rules) {
+        for (const r of [...rules].sort((a, b) => a.i - b.i)) {
             if (!r.m) { plain.push(r.c); continue; }
             if (!media.has(r.m)) { media.set(r.m, []); }
             media.get(r.m).push(r.c);
