@@ -1,0 +1,17 @@
+msgid ""
+msgstr ""
+"Project-Id-Version: ergonet_critical_css\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Language: el\n"
+
+msgctxt "Addons::name::ergonet_critical_css"
+msgid "Ergonet Critical CSS"
+msgstr "Ergonet Critical CSS"
+
+msgctxt "Addons::description::ergonet_critical_css"
+msgid "Inlines per-theme critical CSS and makes the theme bundle non-render-blocking."
+msgstr "Ενθέτει το critical CSS ανά θέμα και ξεμπλοκάρει το bundle του θέματος."
+
+msgctxt "SettingsOptions::ergonet_critical_css::enabled"
+msgid "Enabled"
+msgstr "Ενεργό"
